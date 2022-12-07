@@ -1,0 +1,636 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Maximisation couple moyen\n",
+    "\n",
+    "Ce notebook propose d'optimiser le rotor d'une machine synchro-réluctante sans aimant à une paire de pôle en vue de maximiser le couple moyen.\n",
+    "Dans ce cas particulier, le couple moyen est directement relié à la différence de perméance magnétique du rotor dans l'axe direct d et l'axe en quadrature q.\n",
+    "\n",
+    "Le problème étudié est donc la maximisation de cette différence de perméance via la différence de compliance magnétique. Il est possible de démontrer que ce problème est mal posé."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "importing NGSolve-6.2.2105-9-g5a835126f\n"
+     ]
+    }
+   ],
+   "source": [
+    "from ngsolve import *\n",
+    "from ngsolve.webgui import Draw\n",
+    "from netgen.geom2d import SplineGeometry\n",
+    "#from netgen.geom2d import unit_square\n",
+    "import copy\n",
+    "from numpy.random import randint"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 1) Définition du maillage\n",
+    "\n",
+    "La première étape consiste à définir une géométrie (disque), ainsi que la finesse de maillage associée."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#h = 0.1; # ne pas prendre moins de 1/50\n",
+    "\n",
+    "#mesh = Mesh(unit_square.GenerateMesh(maxh=h))\n",
+    "#Draw (mesh)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "c6661983ff2a479ab7a8fdc5e7d4c22d",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(value={'ngsolve_version': '6.2.2105-9-g5a835126f', 'mesh_dim': 2, 'order2d': 1, 'order3d': 1, 'dr…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "BaseWebGuiScene"
+      ]
+     },
+     "execution_count": 3,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "geo = SplineGeometry()\n",
+    "\n",
+    "R = 1;\n",
+    "h = R/50; # ne pas prendre moins de R/50\n",
+    "\n",
+    "pnts = [(R,0),(R,-R),(0,-R),(-R,-R),(-R,0),(-R,R),(0,R),(R,R)]\n",
+    "\n",
+    "p = [geo.AppendPoint(*pnt) for pnt in pnts]\n",
+    "\n",
+    "\n",
+    "geo.Append([\"spline3\",*p[:3]],leftdomain=0,rightdomain=1,bc=\"bottom_right\")\n",
+    "geo.Append([\"spline3\",*p[2:5]],leftdomain=0,rightdomain=1,bc=\"bottom_left\")\n",
+    "geo.Append([\"spline3\",*p[4:7]],leftdomain=0,rightdomain=1,bc=\"up_left\")\n",
+    "geo.Append([\"spline3\",*p[6:],p[0]],leftdomain=0,rightdomain=1,bc=\"up_right\")\n",
+    "\n",
+    "geo.SetMaterial(1, \"in\")\n",
+    "\n",
+    "geo.SetDomainMaxH(1, 0.05)\n",
+    "ngmesh = geo.GenerateMesh(maxh=h)\n",
+    "mesh = Mesh(ngmesh)\n",
+    "Draw (mesh)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 2) Définition des problèmes éléments finis\n",
+    "\n",
+    "L'objectif est ici de maximiser la différence de compliance magnétique pour deux chargement distincts. On va résoudre le problème magnétostatique dual ; pour cela, remarquons qu'en l'absence de termes sources:\n",
+    "\n",
+    "$$ \\overrightarrow{\\text{rot}} ~ \\overrightarrow{h} = 0 $$\n",
+    "\n",
+    "On pose donc $\\phi$ un potentiel scalaire tel que $\\overrightarrow{h} = \\overrightarrow{\\text{grad}} ~ \\phi$, qui vérifie donc dans $\\Omega$:\n",
+    "$$ \\text{div}( \\mu ~\\overrightarrow{\\text{grad}} ~ \\phi ) = 0 $$\n",
+    "\n",
+    "$\\phi$ est un champ scalaire qu'on va supposer appartenant à $H^1$. Les conditions aux bords sont de Neumann. La solution est unique à une constante près. Les deux problèmes à résoudre s'écrivent donc :\n",
+    "\n",
+    "$$\\left \\{\n",
+    "\\begin{array}{l}\n",
+    "     \\text{div}( \\mu ~\\overrightarrow{\\text{grad}} ~ \\phi ) = 0 \\\\\n",
+    "     \\frac{\\partial \\phi}{\\partial n} = \\Phi ~ \\text{sur} ~ \\Gamma_1 \\bigcup \\Gamma_2 \\\\\n",
+    "     \\frac{\\partial \\phi}{\\partial n} = - \\Phi ~ \\text{sur} ~ \\Gamma_3 \\bigcup \\Gamma_4 \n",
+    "\\end{array}\n",
+    "\\right. $$\n",
+    "\n",
+    "$$\\left \\{\n",
+    "\\begin{array}{l}\n",
+    "     \\text{div}( \\mu ~\\overrightarrow{\\text{grad}} ~ \\phi ) = 0 \\\\\n",
+    "     \\frac{\\partial \\phi}{\\partial n} = \\Phi ~ \\text{sur} ~ \\Gamma_2 \\bigcup \\Gamma_3 \\\\\n",
+    "     \\frac{\\partial \\phi}{\\partial n} = - \\Phi ~ \\text{sur} ~ \\Gamma_1 \\bigcup \\Gamma_4 \n",
+    "\\end{array}\n",
+    "\\right. $$\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Sous forme faible, ce problème s'écrit donc :\n",
+    "\n",
+    "$$\\forall \\psi \\in H^1, \\underbrace{\\int_{\\Omega} ~\\overrightarrow{\\text{grad}} ~ \\psi \\cdot  \\mu ~\\overrightarrow{\\text{grad}} ~ \\phi}_{\\text{forme bilinéaire} } = \\underbrace{\\int_{\\Gamma_+} \\psi \\Phi - \\int_{\\Gamma_-} \\psi \\Phi}_{\\text{forme linéaire}} $$\n",
+    "\n",
+    "Par ailleurs, on suppose que $\\mu$ est constante par morceau."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "PHI = 1;\n",
+    "\n",
+    "def solvePb(mu):\n",
+    "    fespace_H1 = H1(mesh, order=1)\n",
+    "    fespace_H1.FreeDofs()[0] = False\n",
+    "    phi = fespace_H1.TrialFunction()\n",
+    "    psi = fespace_H1.TestFunction()\n",
+    "    K = BilinearForm(fespace_H1, symmetric=True)\n",
+    "    K +=  InnerProduct(grad(psi),mu*grad(phi))*dx\n",
+    "\n",
+    "    n= specialcf.normal(mesh.dim);\n",
+    "\n",
+    "    l1 = LinearForm(fespace_H1)\n",
+    "    l1 += InnerProduct(psi,-PHI)*ds(definedon=mesh.Boundaries(\"bottom_right|bottom_left\"))\n",
+    "    l1 += InnerProduct(psi,PHI)*ds(definedon=mesh.Boundaries(\"up_right|up_left\"))\n",
+    "\n",
+    "    l2 = LinearForm(fespace_H1)\n",
+    "    l2 += InnerProduct(psi,-PHI)*ds(definedon=mesh.Boundaries(\"bottom_right|up_right\"))\n",
+    "    l2 += InnerProduct(psi,PHI)*ds(definedon=mesh.Boundaries(\"bottom_left|up_left\"))\n",
+    "    \n",
+    "    K.Assemble()\n",
+    "    l1.Assemble()\n",
+    "    l2.Assemble()\n",
+    "    \n",
+    "    phi1 = GridFunction(fespace_H1)  # solution\n",
+    "    phi1.vec.data =     K.mat.Inverse(inverse=\"sparsecholesky\") * l1.vec\n",
+    "    phi2 = GridFunction(fespace_H1)  # solution\n",
+    "    phi2.vec.data =     K.mat.Inverse(inverse=\"sparsecholesky\") * l2.vec\n",
+    "    \n",
+    "    return(phi1, phi2)\n",
+    "    \n",
+    "fespace_mu = L2(mesh, order=0)    \n",
+    "mu = GridFunction(fespace_mu)\n",
+    "s = (randint(2, size=len(mu.vec[:].FV()))+1)*4e-7*3.14*1.5\n",
+    "mu.vec[:]= 4e-7*3.14*1.5 #s[:]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "phi1, phi2 = solvePb(mu)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "fcaa8703f3564770aea624ff9ae2de8a",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(value={'ngsolve_version': '6.2.2105-9-g5a835126f', 'mesh_dim': 2, 'order2d': 2, 'order3d': 2, 'dr…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "Draw (grad(phi1), mesh,vectors = { \"grid_size\":20});"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "8d8228663abc42188f117131733c7bfb",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(value={'ngsolve_version': '6.2.2105-9-g5a835126f', 'mesh_dim': 2, 'order2d': 2, 'order3d': 2, 'dr…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "Draw (phi2, mesh);"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## 3) Optimisation\n",
+    "\n",
+    "Le problème est auto-adjoint. Ainsi, l'adjoint s'écrit $\\psi = -\\phi$ et l'identification $\\mathcal{L}^2$ du gradient par rapport à $\\mu$ s'écrit:\n",
+    "$$\\partial_\\mu \\mathcal{L} = -\\int_\\Omega |\\nabla \\phi|^2 $$"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def gradient(phi1,phi2):\n",
+    "    return(-grad(phi1)*grad(phi1) + grad(phi2)*grad(phi2))\n",
+    "\n",
+    "def objective(phi1,phi2,mu):\n",
+    "    return(Integrate(grad(phi1)*mu* grad(phi1) -  grad(phi2)*mu* grad(phi2), mesh))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "20.55746592611319 - normalized step : 0.5\n",
+      "-525889.4576560745 - normalized step : 0.5\n",
+      "-919638.0126642949 - normalized step : 0.5\n",
+      "-1025230.2876721153 - normalized step : 0.5\n",
+      "-1047590.8460435311 - normalized step : 0.5\n",
+      "-1048765.6003587632 - normalized step : 0.5\n",
+      "-1051707.3515182845 - normalized step : 0.5\n",
+      "-1053219.1335779093 - normalized step : 0.5\n",
+      "-1054771.19963148 - normalized step : 0.5\n",
+      "-1055426.5262696412 - normalized step : 0.5\n",
+      "-1056200.7142085242 - normalized step : 0.5\n",
+      "-1056298.6402170414 - normalized step : 0.5\n",
+      "-1056328.883152873 - normalized step : 0.5\n",
+      "-1056273.8838842679 - normalized step : 0.5\n",
+      "-1056328.8831528416 - normalized step : 0.5\n",
+      "-1056273.8838842358 - normalized step : 0.5\n",
+      "-1056328.8831528018 - normalized step : 0.5\n",
+      "-1056273.8838843112 - normalized step : 0.5\n",
+      "-1056328.8831527578 - normalized step : 0.5\n",
+      "-1056273.8838842565 - normalized step : 0.5\n"
+     ]
+    }
+   ],
+   "source": [
+    "J=[]\n",
+    "mu0 = 4e-7*3.14\n",
+    "mu_max = 3* mu0\n",
+    "step = (mu_max-mu0)/2\n",
+    "g = GridFunction(fespace_mu)\n",
+    "G=[]\n",
+    "MU=[]\n",
+    "for i in range(20):\n",
+    "    phi1, phi2 = solvePb(mu)\n",
+    "    g.Set(gradient(phi1,phi2))\n",
+    "    g.vec[:]= g.vec[:].FV().NumPy()\n",
+    "    J.append(objective(phi1,phi2,mu))\n",
+    "    MU.append(copy.copy(mu))\n",
+    "    G.append(copy.copy(g))\n",
+    "    print(f'{J[-1]} - normalized step : {step/(mu_max-mu0)}')\n",
+    "    \n",
+    "    #if i>0 and J[-1]< J[-2]:\n",
+    "        #step = step*1.2\n",
+    "    #elif i>0:\n",
+    "        #step = step/2\n",
+    "    mu.Set(1*mu - g*step)\n",
+    "    mu.vec[:].FV().NumPy()[mu.vec[:].FV().NumPy()<mu0]=mu0\n",
+    "    mu.vec[:].FV().NumPy()[mu.vec[:].FV().NumPy()>mu_max]=mu_max"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "b94bd97b76c84ab290b73d8babaeb31c",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(value={'ngsolve_version': '6.2.2105-9-g5a835126f', 'mesh_dim': 2, 'order2d': 2, 'order3d': 2, 'dr…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "BaseWebGuiScene"
+      ]
+     },
+     "execution_count": 10,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "Draw(MU[-1],mesh,min=mu0,max=mu_max)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "g.Set(gradient(phi1,phi2))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "3834c40bfb014634999eac5f5f8048ba",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(value={'ngsolve_version': '6.2.2105-9-g5a835126f', 'mesh_dim': 2, 'order2d': 2, 'order3d': 2, 'dr…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "BaseWebGuiScene"
+      ]
+     },
+     "execution_count": 12,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "Draw(InnerProduct(-grad(phi1),grad(phi1))+InnerProduct(grad(phi2),grad(phi2)),mesh)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Help on function Draw in module ngsolve.webgui:\n",
+      "\n",
+      "Draw(mesh_or_func, mesh_or_none=None, name='function', order=2, min=None, max=None, draw_vol=True, draw_surf=True, autoscale=True, deformation=False, interpolate_multidim=False, animate=False, clipping=None, vectors=None, js_code=None, eval_function=None, eval=None, filename='')\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "help(Draw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "ef73761d2cf044e5b0a441cdf8f86550",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(value={'ngsolve_version': '6.2.2105-9-g5a835126f', 'mesh_dim': 2, 'order2d': 2, 'order3d': 2, 'dr…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "phi1, phi2 = solvePb(mu)\n",
+    "g = gradient(phi1,phi2)\n",
+    "Draw(mu+g,mesh)\n",
+    "a = mu+g"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.jupyter.widget-view+json": {
+       "model_id": "33e2e483e713408eb73fe60b6b3fc8ee",
+       "version_major": 2,
+       "version_minor": 0
+      },
+      "text/plain": [
+       "WebGuiWidget(value={'ngsolve_version': '6.2.2105-9-g5a835126f', 'mesh_dim': 2, 'order2d': 2, 'order3d': 2, 'dr…"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    },
+    {
+     "data": {
+      "text/plain": [
+       "BaseWebGuiScene"
+      ]
+     },
+     "execution_count": 15,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "Draw(gradient(phi1,phi2),mesh)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [
+    {
+     "ename": "TypeError",
+     "evalue": "Integrate(): incompatible function arguments. The following argument types are supported:\n    1. (cf: ngsolve.fem.CoefficientFunction, mesh: Union[ngsolve.comp.Mesh, ngsolve.comp.Region], VOL_or_BND: ngsolve.comp.VorB = <VorB.VOL: 0>, order: int = 5, definedon: ngsolve.comp.Region = None, region_wise: bool = False, element_wise: bool = False) -> object\n    2. (igls: ngsolve.comp.SumOfIntegrals, mesh: ngsolve.comp.Mesh, element_wise: bool = False) -> object\n\nInvoked with: <ngsolve.comp.SumOfIntegrals object at 0x7fcd2847a130>",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[0;31mTypeError\u001b[0m                                 Traceback (most recent call last)",
+      "\u001b[0;32m/tmp/ipykernel_37079/1375631795.py\u001b[0m in \u001b[0;36m<module>\u001b[0;34m\u001b[0m\n\u001b[0;32m----> 1\u001b[0;31m \u001b[0mIntegrate\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mgrad\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mphi1\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m*\u001b[0m\u001b[0mmu\u001b[0m\u001b[0;34m*\u001b[0m \u001b[0mgrad\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mphi1\u001b[0m\u001b[0;34m)\u001b[0m \u001b[0;34m-\u001b[0m \u001b[0mgrad\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mphi2\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m*\u001b[0m\u001b[0mmu\u001b[0m\u001b[0;34m*\u001b[0m \u001b[0mgrad\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mphi2\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m*\u001b[0m\u001b[0mdx\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m",
+      "\u001b[0;31mTypeError\u001b[0m: Integrate(): incompatible function arguments. The following argument types are supported:\n    1. (cf: ngsolve.fem.CoefficientFunction, mesh: Union[ngsolve.comp.Mesh, ngsolve.comp.Region], VOL_or_BND: ngsolve.comp.VorB = <VorB.VOL: 0>, order: int = 5, definedon: ngsolve.comp.Region = None, region_wise: bool = False, element_wise: bool = False) -> object\n    2. (igls: ngsolve.comp.SumOfIntegrals, mesh: ngsolve.comp.Mesh, element_wise: bool = False) -> object\n\nInvoked with: <ngsolve.comp.SumOfIntegrals object at 0x7fcd2847a130>"
+     ]
+    }
+   ],
+   "source": [
+    "Integrate((grad(phi1)*mu* grad(phi1) - grad(phi2)*mu* grad(phi2))*dx)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "(grad(phi1)*mu* grad(phi1) - grad(phi2)*mu* grad(phi2))*dx"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "grad(phi1)*mu* grad(phi1) - grad(phi2),mu* grad(phi2)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "g.vec[:]= g.vec[:].FV().NumPy()/max(g.vec[:])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "Integrate(grad(phi1)*mu* grad(phi1) - grad(phi2)*mu* grad(phi2), mesh)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "J=[]\n",
+    "step = 0.1\n",
+    "g = GridFunction(fespace_mu)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "help(Draw)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "a.datavec.FV()[:] = a.vec.FV()[:] /max(a.vec.FV()[:] )"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3 (ipykernel)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.10"
+  },
+  "livereveal": {
+   "autolaunch": true
+  },
+  "toc": {
+   "base_numbering": 1,
+   "nav_menu": {},
+   "number_sections": true,
+   "sideBar": true,
+   "skip_h1_title": false,
+   "title_cell": "Table of Contents",
+   "title_sidebar": "Contents",
+   "toc_cell": false,
+   "toc_position": {},
+   "toc_section_display": true,
+   "toc_window_display": false
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
